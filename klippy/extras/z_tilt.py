@@ -129,7 +129,7 @@ class ZTilt:
         self.printer = config.get_printer()
         self.z_positions = config.getlists('z_positions', seps=(',', '\n'),
                                            parser=float, count=2)
-        self.raise_only = config.getboolean('raise_only', False)
+        self.min_adjust_z1 = config.getfloat('min_adjust_z1', None)
         self.retry_helper = RetryHelper(config)
         self.probe_helper = probe.ProbePointsHelper(config, self.probe_finalize)
         self.probe_helper.minimum_points(2)
@@ -164,12 +164,11 @@ class ZTilt:
         speed = self.probe_helper.get_lift_speed()
         adjustments = [x*x_adjust + y*y_adjust + z_adjust
                        for x, y in self.z_positions]
-        if self.raise_only:
-            min_adjust = min(adjustments)
-            if min_adjust < 0.:
-                bias = -min_adjust
+        if self.min_adjust_z1 is not None:
+            bias = self.min_adjust_z1 - adjustments[1]
+            if bias > 0.:
                 adjustments = [a + bias for a in adjustments]
-                logging.info("Applying raise-only Z tilt bias: %.6f", bias)
+                logging.info("Applying Z1 adjustment bias: %.6f", bias)
         self.z_helper.adjust_steppers(adjustments, speed)
         return self.z_status.check_retry_result(
             self.retry_helper.check_retry([p[2] for p in positions]))
