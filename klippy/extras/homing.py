@@ -137,6 +137,7 @@ class HomingMove:
         trigger_times = {}
         move_end_print_time = self.toolhead.get_last_move_time()
         shared_dispatch_result = None
+        shared_trigger_times = {}
         for mcu_endstop, name in self.endstops:
             try:
                 if self.shared_endstop_dispatch:
@@ -149,20 +150,38 @@ class HomingMove:
                         trigger_time = mcu_endstop.home_wait(
                             move_end_print_time,
                             dispatch_result=shared_dispatch_result)
-                    if mcu_endstop.query_endstop(move_end_print_time):
-                        trigger_times[name] = trigger_time or move_end_print_time
-                        continue
+                    shared_trigger_times[name] = trigger_time
                 else:
                     trigger_time = mcu_endstop.home_wait(move_end_print_time)
             except self.printer.command_error as e:
                 if error is None:
                     error = "Error during homing %s: %s" % (name, str(e))
                 continue
-            if trigger_time > 0.:
-                trigger_times[name] = trigger_time
-            elif (check_triggered and error is None
-                  and name == self.stepper_endstop):
-                error = "No trigger on %s after full movement" % (name,)
+            if not self.shared_endstop_dispatch:
+                if trigger_time > 0.:
+                    trigger_times[name] = trigger_time
+                elif (check_triggered and error is None
+                      and name == self.stepper_endstop):
+                    error = "No trigger on %s after full movement" % (name,)
+        if self.shared_endstop_dispatch:
+            # Query all inputs after both endstop channels have been
+            # disarmed.  A shared trsync stop can leave the non-triggering
+            # channel's cached state asserted, so prefer a live probe trigger
+            # when both inputs appear active.
+            shared_states = {
+                name: mcu_endstop.query_endstop(move_end_print_time)
+                for mcu_endstop, name in self.endstops}
+            if shared_states.get(self.stepper_endstop, False):
+                trigger_times[self.stepper_endstop] = (
+                    shared_trigger_times.get(self.stepper_endstop)
+                    or move_end_print_time)
+            elif shared_states.get("safety_endstop", False):
+                trigger_times["safety_endstop"] = (
+                    shared_trigger_times.get("safety_endstop")
+                    or move_end_print_time)
+            elif check_triggered and error is None:
+                error = "No trigger on %s after full movement" % (
+                    self.stepper_endstop,)
         self.trigger_times = trigger_times
         # Determine stepper halt positions
         self.toolhead.flush_step_generation()
