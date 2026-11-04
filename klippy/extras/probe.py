@@ -565,6 +565,7 @@ def run_single_probe(probe, gcmd):
 class ProbeEndstopWrapper:
     def __init__(self, config, probe_offsets, param_helper):
         self.printer = config.get_printer()
+        self.param_helper = param_helper
         self.stow_on_each_sample = config.getboolean(
             'deactivate_on_each_sample', True)
         self.verify_deploy = config.getboolean('verify_deploy', True)
