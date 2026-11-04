@@ -264,7 +264,8 @@ class DescendToEndstopHelper:
                     if stepper not in rail.get_steppers():
                         continue
                     self.safety_endstop = rail.lookup_endstop(
-                        self.safety_endstop_pin, 'safety_endstop')
+                        self.safety_endstop_pin, 'safety_endstop',
+                        add_to_rail=False)
                     self.safety_endstop.share_dispatch(self.mcu_probe)
                     break
         LookupZSteppers(config, add_z_stepper)
