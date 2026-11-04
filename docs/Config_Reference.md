@@ -2138,6 +2138,9 @@ pin:
 #   This determines if Klipper should execute deactivation gcode
 #   between each probe attempt when performing a multiple probe
 #   sequence. The default is True.
+#verify_deploy: True
+#   Verify that the probe reports open after activate_gcode before beginning
+#   a probe move. If it remains triggered, the probe move is aborted.
 #x_offset: 0.0
 #   The distance (in mm) between the probe and the nozzle along the
 #   x-axis. The default is 0.

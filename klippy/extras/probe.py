@@ -566,6 +566,7 @@ class ProbeEndstopWrapper:
         self.printer = config.get_printer()
         self.stow_on_each_sample = config.getboolean(
             'deactivate_on_each_sample', True)
+        self.verify_deploy = config.getboolean('verify_deploy', True)
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.activate_gcode = gcode_macro.load_template(
             config, 'activate_gcode', '')
@@ -596,6 +597,12 @@ class ProbeEndstopWrapper:
         if toolhead.get_position()[:3] != start_pos[:3]:
             raise self.printer.command_error(
                 "Toolhead moved during probe activate_gcode script")
+        if self.verify_deploy:
+            print_time = toolhead.get_last_move_time()
+            if self.query_endstop(print_time):
+                self._raise_probe()
+                raise self.printer.command_error(
+                    "Probe failed to deploy")
     def start_probe_session(self, gcmd):
         self.homing_helper.clear_trigger_positions()
         if not self.stow_on_each_sample:
