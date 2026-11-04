@@ -6,6 +6,7 @@
 import logging
 import pins
 from . import manual_probe
+from . import homing
 
 HINT_TIMEOUT = """
 If the probe did not move far enough to trigger, then
@@ -569,6 +570,10 @@ class ProbeEndstopWrapper:
         self.verify_deploy = config.getboolean('verify_deploy', True)
         self.deploy_attempts = config.getint('deploy_attempts', 5,
                                              minval=1, maxval=5)
+        self.safety_recovery_z = config.getfloat(
+            'safety_recovery_z', 0., minval=0.)
+        self.safety_recovery_retries = config.getint(
+            'safety_recovery_retries', 0, minval=0, maxval=5)
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.activate_gcode = gcode_macro.load_template(
             config, 'activate_gcode', '')
@@ -622,11 +627,40 @@ class ProbeEndstopWrapper:
     def _probe_finish(self):
         if self.multi == 'OFF':
             self._raise_probe()
+    def _recover_safety_endstop(self, gcmd, attempt):
+        toolhead = self.printer.lookup_object('toolhead')
+        if self.safety_recovery_z <= 0.:
+            raise gcmd.error("Safety endstop triggered during probe")
+        curpos = toolhead.get_position()
+        curpos[2] += self.safety_recovery_z
+        params = self.param_helper.get_probe_params(gcmd)
+        gcmd.respond_info(
+            "Safety endstop triggered; raising Z %.3f mm and retrying "
+            "probe (%d/%d)" % (self.safety_recovery_z, attempt,
+                                self.safety_recovery_retries))
+        toolhead.manual_move(curpos, params['lift_speed'])
+        self._raise_probe()
+        print_time = toolhead.get_last_move_time()
+        if self.homing_helper.safety_endstop is not None:
+            if self.homing_helper.safety_endstop.query_endstop(print_time):
+                raise gcmd.error(
+                    "Safety endstop remained triggered after recovery")
+        self._lower_probe()
     def run_probe(self, gcmd):
         self._probe_prepare()
         try:
-            self.homing_helper.descend_until_trigger(gcmd)
-        except self.printer.command_error as e:
+            attempt = 0
+            while True:
+                try:
+                    self.homing_helper.descend_until_trigger(gcmd)
+                    break
+                except homing.ProbeSafetyError:
+                    if attempt >= self.safety_recovery_retries:
+                        raise gcmd.error(
+                            "Safety endstop triggered during probe")
+                    attempt += 1
+                    self._recover_safety_endstop(gcmd, attempt)
+        except self.printer.command_error:
             self._probe_finish()
             raise
         self._probe_finish()

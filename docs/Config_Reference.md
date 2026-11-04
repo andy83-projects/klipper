@@ -2149,6 +2149,13 @@ pin:
 #deploy_attempts: 5
 #   Number of times to run activate_gcode while verifying probe deployment.
 #   The range is 1 to 5 and the default is 5.
+#safety_recovery_z: 0.0
+#   If safety_endstop_pin triggers during a probe move, raise the toolhead by
+#   this distance before retrying. A value of 0 disables recovery. The default
+#   is 0.0.
+#safety_recovery_retries: 0
+#   Number of times to recover from a safety endstop trigger and retry the
+#   probe. The range is 0 to 5 and the default is 0.
 #x_offset: 0.0
 #   The distance (in mm) between the probe and the nozzle along the
 #   x-axis. The default is 0.

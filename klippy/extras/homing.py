@@ -9,6 +9,9 @@ HOMING_START_DELAY = 0.001
 ENDSTOP_SAMPLE_TIME = .000015
 ENDSTOP_SAMPLE_COUNT = 4
 
+class ProbeSafetyError(Exception):
+    """A probe move stopped on its auxiliary safety endstop."""
+
 # Return a completion that completes when all completions in a list complete
 def multi_complete(printer, completions):
     if len(completions) == 1:
@@ -403,8 +406,7 @@ class PrinterHoming:
                     "Probing failed due to printer shutdown")
             raise
         if "safety_endstop" in hmove.trigger_times:
-            raise self.printer.command_error(
-                "Safety endstop triggered during probe")
+            raise ProbeSafetyError("Safety endstop triggered during probe")
         if check_movement and hmove.check_no_movement() is not None:
             raise self.printer.command_error(
                 "Probe triggered prior to movement")
