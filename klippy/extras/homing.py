@@ -22,6 +22,17 @@ def multi_complete(printer, completions):
             lambda e, c=c: cp.complete(1) if c.wait() else 0)
     return cp
 
+# Return a completion that completes when any completion in a list completes
+def multi_complete_any(printer, completions):
+    if len(completions) == 1:
+        return completions[0]
+    reactor = printer.get_reactor()
+    cp = reactor.register_callback(lambda e: 0)
+    for c in completions:
+        reactor.register_callback(
+            lambda e, c=c: cp.complete(1) if c.wait() else 0)
+    return cp
+
 # Tracking of stepper positions during a homing/probing move
 class StepperPosition:
     def __init__(self, stepper, endstop_name):
@@ -43,13 +54,16 @@ class StepperPosition:
 
 # Implementation of homing/probing moves
 class HomingMove:
-    def __init__(self, printer, endstops, toolhead=None):
+    def __init__(self, printer, endstops, toolhead=None,
+                 stepper_endstop=None):
         self.printer = printer
         self.endstops = [es for es in endstops if es[0].get_steppers()]
         if toolhead is None:
             toolhead = printer.lookup_object('toolhead')
         self.toolhead = toolhead
+        self.stepper_endstop = stepper_endstop
         self.stepper_positions = []
+        self.trigger_times = {}
     def get_mcu_endstops(self):
         return [es for es, name in self.endstops]
     def _calc_endstop_rate(self, mcu_endstop, movepos, speed):
@@ -83,8 +97,12 @@ class HomingMove:
         kin = self.toolhead.get_kinematics()
         kin_spos = {s.get_name(): s.get_commanded_position()
                     for s in kin.get_steppers()}
+        stepper_endstops = self.endstops
+        if self.stepper_endstop is not None:
+            stepper_endstops = [es for es in self.endstops
+                                if es[1] == self.stepper_endstop]
         self.stepper_positions = [ StepperPosition(s, name)
-                                   for es, name in self.endstops
+                                   for es, name in stepper_endstops
                                    for s in es.get_steppers() ]
         # Start endstop checking
         print_time = self.toolhead.get_last_move_time()
@@ -95,7 +113,12 @@ class HomingMove:
                                           ENDSTOP_SAMPLE_COUNT, rest_time,
                                           triggered=triggered)
             endstop_triggers.append(wait)
-        all_endstop_trigger = multi_complete(self.printer, endstop_triggers)
+        if self.stepper_endstop is None:
+            all_endstop_trigger = multi_complete(
+                self.printer, endstop_triggers)
+        else:
+            all_endstop_trigger = multi_complete_any(
+                self.printer, endstop_triggers)
         self.toolhead.dwell(HOMING_START_DELAY)
         # Issue move
         error = None
@@ -115,8 +138,10 @@ class HomingMove:
                 continue
             if trigger_time > 0.:
                 trigger_times[name] = trigger_time
-            elif check_triggered and error is None:
+            elif (check_triggered and error is None
+                  and name == self.stepper_endstop):
                 error = "No trigger on %s after full movement" % (name,)
+        self.trigger_times = trigger_times
         # Determine stepper halt positions
         self.toolhead.flush_step_generation()
         for sp in self.stepper_positions:
@@ -321,9 +346,13 @@ class PrinterHoming:
     def check_probe_first_home(self, gcmd):
         return (gcmd.get_command() == 'G28'
                 and gcmd.get("HOME_ATTEMPT_NUM", None) == '1')
-    def probing_move(self, mcu_probe, pos, speed, check_movement=True):
+    def probing_move(self, mcu_probe, pos, speed, check_movement=True,
+                     safety_endstop=None):
         endstops = [(mcu_probe, "probe")]
-        hmove = HomingMove(self.printer, endstops)
+        if safety_endstop is not None:
+            endstops.append((safety_endstop, "safety_endstop"))
+        hmove = HomingMove(self.printer, endstops,
+                           stepper_endstop="probe")
         try:
             epos = hmove.homing_move(pos, speed, probe_pos=True)
         except self.printer.command_error:
@@ -331,6 +360,9 @@ class PrinterHoming:
                 raise self.printer.command_error(
                     "Probing failed due to printer shutdown")
             raise
+        if "safety_endstop" in hmove.trigger_times:
+            raise self.printer.command_error(
+                "Safety endstop triggered during probe")
         if check_movement and hmove.check_no_movement() is not None:
             raise self.printer.command_error(
                 "Probe triggered prior to movement")

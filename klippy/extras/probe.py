@@ -245,15 +245,20 @@ class HomingViaProbeHelper:
 # Support for probes that trigger via mcu_endstop
 class DescendToEndstopHelper:
     def __init__(self, config, mcu_probe, probe_offsets, param_helper,
-                 always_check_movement=False):
+                 always_check_movement=False, safety_endstop=None):
         self.printer = config.get_printer()
         self.mcu_probe = mcu_probe
         self.probe_offsets = probe_offsets
         self.param_helper = param_helper
         self.always_check_movement = always_check_movement
+        self.safety_endstop = safety_endstop
         self.z_min_position = lookup_minimum_z(config)
         self.results = []
-        LookupZSteppers(config, self.mcu_probe.add_stepper)
+        def add_z_stepper(stepper):
+            self.mcu_probe.add_stepper(stepper)
+            if self.safety_endstop is not None:
+                self.safety_endstop.add_stepper(stepper)
+        LookupZSteppers(config, add_z_stepper)
     def descend_until_trigger(self, gcmd):
         toolhead = self.printer.lookup_object('toolhead')
         pos = toolhead.get_position()
@@ -262,8 +267,9 @@ class DescendToEndstopHelper:
         phoming = self.printer.lookup_object('homing')
         check_movement = (self.always_check_movement
                           or not phoming.check_probe_first_home(gcmd))
-        ppos = phoming.probing_move(self.mcu_probe, pos, speed,
-                                    check_movement=check_movement)
+        ppos = phoming.probing_move(
+            self.mcu_probe, pos, speed, check_movement=check_movement,
+            safety_endstop=self.safety_endstop)
         offsets = self.probe_offsets.get_offsets()
         res = manual_probe.create_probe_result(ppos, offsets)
         self.results.append(res)
@@ -558,10 +564,15 @@ class ProbeEndstopWrapper:
         # Create an "endstop" object to handle the probe pin
         ppins = self.printer.lookup_object('pins')
         self.mcu_endstop = ppins.setup_pin('endstop', config.get('pin'))
+        safety_pin = config.get('safety_endstop_pin', None)
+        self.safety_endstop = None
+        if safety_pin is not None:
+            self.safety_endstop = ppins.setup_pin('endstop', safety_pin)
         self.query_endstop = self.mcu_endstop.query_endstop
         # Probing via homing to endstop
         self.homing_helper = DescendToEndstopHelper(
-            config, self.mcu_endstop, probe_offsets, param_helper)
+            config, self.mcu_endstop, probe_offsets, param_helper,
+            safety_endstop=self.safety_endstop)
         # multi probes state
         self.multi = 'OFF'
     def _raise_probe(self):

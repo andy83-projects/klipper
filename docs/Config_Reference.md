@@ -2129,6 +2129,11 @@ pin:
 #   Probe detection pin. If the pin is on a different microcontroller
 #   than the Z steppers then it enables "multi-mcu homing". This
 #   parameter must be provided.
+#safety_endstop_pin:
+#   Optional endstop pin to monitor during probe moves. If this endstop
+#   triggers before the probe, the probe move is stopped and reported as
+#   a failure. The normal probe remains the only source of probe results.
+#   This option is disabled by default.
 #deactivate_on_each_sample: True
 #   This determines if Klipper should execute deactivation gcode
 #   between each probe attempt when performing a multiple probe
