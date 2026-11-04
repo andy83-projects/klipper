@@ -355,6 +355,11 @@ class MCU_endstop:
         self._dispatch = TriggerDispatch(mcu)
     def get_mcu(self):
         return self._mcu
+    def share_dispatch(self, other):
+        if self._mcu is not other._mcu:
+            raise self._mcu.get_printer().config_error(
+                "Can not share endstop dispatches across MCUs")
+        self._dispatch = other._dispatch
     def add_stepper(self, stepper):
         self._dispatch.add_stepper(stepper)
     def get_steppers(self):
@@ -378,31 +383,44 @@ class MCU_endstop:
             "endstop_state oid=%c homing=%c next_clock=%u pin_value=%c",
             oid=self._oid, cq=cmd_queue)
     def home_start(self, print_time, sample_time, sample_count, rest_time,
-                   triggered=True):
+                   triggered=True, trigger_completion=None):
         clock = self._mcu.print_time_to_clock(print_time)
         rest_ticks = self._mcu.print_time_to_clock(print_time+rest_time) - clock
         self._rest_ticks = rest_ticks
-        trigger_completion = self._dispatch.start(print_time)
+        if trigger_completion is None:
+            trigger_completion = self._dispatch.start(print_time)
         self._home_cmd.send(
             [self._oid, clock, self._mcu.seconds_to_clock(sample_time),
              sample_count, rest_ticks, triggered ^ self._invert,
              self._dispatch.get_oid(), MCU_trsync.REASON_ENDSTOP_HIT],
             reqclock=clock)
         return trigger_completion
-    def home_wait(self, home_end_time):
-        self._dispatch.wait_end(home_end_time)
+    def home_wait(self, home_end_time, dispatch_result=None,
+                  return_dispatch_result=False):
+        if dispatch_result is None:
+            self._dispatch.wait_end(home_end_time)
+            dispatch_result = self._dispatch.stop()
         self._home_cmd.send([self._oid, 0, 0, 0, 0, 0, 0, 0])
-        res = self._dispatch.stop()
+        res = dispatch_result
         if res >= MCU_trsync.REASON_COMMS_TIMEOUT:
             cmderr = self._mcu.get_printer().command_error
             raise cmderr("Communication timeout during homing")
         if res != MCU_trsync.REASON_ENDSTOP_HIT:
-            return 0.
+            result = 0.
+            if return_dispatch_result:
+                return result, res
+            return result
         if self._mcu.is_fileoutput():
-            return home_end_time
+            result = home_end_time
+            if return_dispatch_result:
+                return result, res
+            return result
         params = self._query_cmd.send([self._oid])
         next_clock = self._mcu.clock32_to_clock64(params['next_clock'])
-        return self._mcu.clock_to_print_time(next_clock - self._rest_ticks)
+        result = self._mcu.clock_to_print_time(next_clock - self._rest_ticks)
+        if return_dispatch_result:
+            return result, res
+        return result
     def query_endstop(self, print_time):
         clock = self._mcu.print_time_to_clock(print_time)
         if self._mcu.is_fileoutput():

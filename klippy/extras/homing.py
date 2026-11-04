@@ -55,13 +55,14 @@ class StepperPosition:
 # Implementation of homing/probing moves
 class HomingMove:
     def __init__(self, printer, endstops, toolhead=None,
-                 stepper_endstop=None):
+                 stepper_endstop=None, shared_endstop_dispatch=False):
         self.printer = printer
         self.endstops = [es for es in endstops if es[0].get_steppers()]
         if toolhead is None:
             toolhead = printer.lookup_object('toolhead')
         self.toolhead = toolhead
         self.stepper_endstop = stepper_endstop
+        self.shared_endstop_dispatch = shared_endstop_dispatch
         self.stepper_positions = []
         self.trigger_times = {}
     def get_mcu_endstops(self):
@@ -107,13 +108,19 @@ class HomingMove:
         # Start endstop checking
         print_time = self.toolhead.get_last_move_time()
         endstop_triggers = []
+        shared_completion = None
         for mcu_endstop, name in self.endstops:
             rest_time = self._calc_endstop_rate(mcu_endstop, movepos, speed)
             wait = mcu_endstop.home_start(print_time, ENDSTOP_SAMPLE_TIME,
                                           ENDSTOP_SAMPLE_COUNT, rest_time,
-                                          triggered=triggered)
+                                          triggered=triggered,
+                                          trigger_completion=shared_completion)
+            if self.shared_endstop_dispatch:
+                shared_completion = wait
             endstop_triggers.append(wait)
-        if self.stepper_endstop is None:
+        if self.shared_endstop_dispatch:
+            all_endstop_trigger = shared_completion
+        elif self.stepper_endstop is None:
             all_endstop_trigger = multi_complete(
                 self.printer, endstop_triggers)
         else:
@@ -129,9 +136,24 @@ class HomingMove:
         # Wait for endstops to trigger
         trigger_times = {}
         move_end_print_time = self.toolhead.get_last_move_time()
+        shared_dispatch_result = None
         for mcu_endstop, name in self.endstops:
             try:
-                trigger_time = mcu_endstop.home_wait(move_end_print_time)
+                if self.shared_endstop_dispatch:
+                    if shared_dispatch_result is None:
+                        trigger_time, shared_dispatch_result = \
+                            mcu_endstop.home_wait(
+                                move_end_print_time,
+                                return_dispatch_result=True)
+                    else:
+                        trigger_time = mcu_endstop.home_wait(
+                            move_end_print_time,
+                            dispatch_result=shared_dispatch_result)
+                    if mcu_endstop.query_endstop(move_end_print_time):
+                        trigger_times[name] = trigger_time or move_end_print_time
+                        continue
+                else:
+                    trigger_time = mcu_endstop.home_wait(move_end_print_time)
             except self.printer.command_error as e:
                 if error is None:
                     error = "Error during homing %s: %s" % (name, str(e))
@@ -351,8 +373,9 @@ class PrinterHoming:
         endstops = [(mcu_probe, "probe")]
         if safety_endstop is not None:
             endstops.append((safety_endstop, "safety_endstop"))
-        hmove = HomingMove(self.printer, endstops,
-                           stepper_endstop="probe")
+        hmove = HomingMove(
+            self.printer, endstops, stepper_endstop="probe",
+            shared_endstop_dispatch=safety_endstop is not None)
         try:
             epos = hmove.homing_move(pos, speed, probe_pos=True)
         except self.printer.command_error:
