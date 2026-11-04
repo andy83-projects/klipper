@@ -647,6 +647,20 @@ class ProbeEndstopWrapper:
                 raise gcmd.error(
                     "Safety endstop remained triggered after recovery")
         self._lower_probe()
+    def _clear_safety_endstop(self, gcmd):
+        toolhead = self.printer.lookup_object('toolhead')
+        if self.safety_recovery_z <= 0.:
+            return
+        curpos = toolhead.get_position()
+        curpos[2] += self.safety_recovery_z
+        params = self.param_helper.get_probe_params(gcmd)
+        toolhead.manual_move(curpos, params['lift_speed'])
+        self._raise_probe()
+        print_time = toolhead.get_last_move_time()
+        if (self.homing_helper.safety_endstop is not None
+                and self.homing_helper.safety_endstop.query_endstop(print_time)):
+            raise gcmd.error(
+                "Safety endstop remained triggered after final recovery")
     def run_probe(self, gcmd):
         self._probe_prepare()
         try:
@@ -657,6 +671,7 @@ class ProbeEndstopWrapper:
                     break
                 except homing.ProbeSafetyError:
                     if attempt >= self.safety_recovery_retries:
+                        self._clear_safety_endstop(gcmd)
                         raise gcmd.error(
                             "Safety endstop triggered during probe")
                     attempt += 1
