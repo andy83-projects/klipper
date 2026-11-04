@@ -567,6 +567,8 @@ class ProbeEndstopWrapper:
         self.stow_on_each_sample = config.getboolean(
             'deactivate_on_each_sample', True)
         self.verify_deploy = config.getboolean('verify_deploy', True)
+        self.deploy_attempts = config.getint('deploy_attempts', 5,
+                                             minval=1, maxval=5)
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.activate_gcode = gcode_macro.load_template(
             config, 'activate_gcode', '')
@@ -593,16 +595,20 @@ class ProbeEndstopWrapper:
     def _lower_probe(self):
         toolhead = self.printer.lookup_object('toolhead')
         start_pos = toolhead.get_position()
-        self.activate_gcode.run_gcode_from_command()
-        if toolhead.get_position()[:3] != start_pos[:3]:
-            raise self.printer.command_error(
-                "Toolhead moved during probe activate_gcode script")
-        if self.verify_deploy:
-            print_time = toolhead.get_last_move_time()
-            if self.query_endstop(print_time):
-                self._raise_probe()
+        for attempt in range(self.deploy_attempts):
+            self.activate_gcode.run_gcode_from_command()
+            if toolhead.get_position()[:3] != start_pos[:3]:
                 raise self.printer.command_error(
-                    "Probe failed to deploy")
+                    "Toolhead moved during probe activate_gcode script")
+            if not self.verify_deploy:
+                return
+            print_time = toolhead.get_last_move_time()
+            if not self.query_endstop(print_time):
+                return
+        self._raise_probe()
+        raise self.printer.command_error(
+            "Probe failed to deploy after %d attempts"
+            % (self.deploy_attempts,))
     def start_probe_session(self, gcmd):
         self.homing_helper.clear_trigger_positions()
         if not self.stow_on_each_sample:

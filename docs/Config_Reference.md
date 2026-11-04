@@ -2141,6 +2141,9 @@ pin:
 #verify_deploy: True
 #   Verify that the probe reports open after activate_gcode before beginning
 #   a probe move. If it remains triggered, the probe move is aborted.
+#deploy_attempts: 5
+#   Number of times to run activate_gcode while verifying probe deployment.
+#   The range is 1 to 5 and the default is 5.
 #x_offset: 0.0
 #   The distance (in mm) between the probe and the nozzle along the
 #   x-axis. The default is 0.
