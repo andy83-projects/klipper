@@ -204,6 +204,15 @@ class HomingMove:
                           for sp in self.stepper_positions}
             trig_steps = {sp.stepper_name: sp.trig_pos - sp.start_pos
                           for sp in self.stepper_positions}
+            if "safety_endstop" in trigger_times:
+                # A shared endstop dispatch stops the move at whichever
+                # input triggers first.  If that input is the safety
+                # endstop, the probe trigger position is not valid.  Use the
+                # actual halted stepper positions so the toolhead position is
+                # synchronized before probe recovery moves it again.
+                # Otherwise the planned probe endpoint (often position_min)
+                # can survive the safety recovery as a false Z coordinate.
+                trig_steps = halt_steps
             haltpos = trigpos = self.calc_toolhead_pos(kin_spos, trig_steps)
             if trig_steps != halt_steps:
                 haltpos = self.calc_toolhead_pos(kin_spos, halt_steps)
