@@ -179,9 +179,17 @@ class HomingMove:
                     shared_trigger_times.get(self.stepper_endstop)
                     or move_end_print_time)
             elif shared_states.get("safety_endstop", False):
-                trigger_times["safety_endstop"] = (
+                # The safety input may be the channel that stopped the
+                # shared trsync move.  Use its actual trigger timestamp for
+                # the primary probe as well, otherwise probe_pos handling
+                # falls back to move_end_print_time (the planned end of the
+                # descent, often position_min) and corrupts toolhead Z.
+                safety_trigger_time = (
                     shared_trigger_times.get("safety_endstop")
                     or move_end_print_time)
+                trigger_times["safety_endstop"] = safety_trigger_time
+                if self.stepper_endstop is not None:
+                    trigger_times[self.stepper_endstop] = safety_trigger_time
             elif check_triggered and error is None:
                 error = "No trigger on %s after full movement" % (
                     self.stepper_endstop,)
