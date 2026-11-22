@@ -1333,6 +1333,11 @@ extended [G-Code command](G-Codes.md#z_tilt) becomes available.
 #horizontal_move_z: 5
 #   The height (in mm) that the head should be commanded to move to
 #   just prior to starting a probe operation. The default is 5.
+#min_adjust_z1:
+#   Optional minimum adjustment for the second Z stepper. If the calculated
+#   adjustment is below this value, a common bias is added to all Z steppers;
+#   this preserves the tilt correction while allowing the other Z steppers to
+#   move in either direction.
 #retries: 0
 #   Number of times to retry if the probed points aren't within
 #   tolerance.
