@@ -3,6 +3,7 @@
 # Merging (never rebasing) keeps b1-stable fast-forward-only, so Moonraker on
 # the printer can always update with a plain pull. A merge conflict or a test
 # failure fails this run, pushes nothing, and GitHub emails the repo owner.
+# Run manually from the Actions tab with "Run workflow" at any time.
 name: Monthly upstream sync (b1-stable)
 on:
   schedule:
