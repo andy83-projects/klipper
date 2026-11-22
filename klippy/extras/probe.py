@@ -6,6 +6,7 @@
 import logging
 import pins
 from . import manual_probe
+from . import homing
 
 HINT_TIMEOUT = """
 If the probe did not move far enough to trigger, then
@@ -245,15 +246,30 @@ class HomingViaProbeHelper:
 # Support for probes that trigger via mcu_endstop
 class DescendToEndstopHelper:
     def __init__(self, config, mcu_probe, probe_offsets, param_helper,
-                 always_check_movement=False):
+                 always_check_movement=False, safety_endstop_pin=None):
         self.printer = config.get_printer()
         self.mcu_probe = mcu_probe
         self.probe_offsets = probe_offsets
         self.param_helper = param_helper
         self.always_check_movement = always_check_movement
+        self.safety_endstop_pin = safety_endstop_pin
+        self.safety_endstop = None
         self.z_min_position = lookup_minimum_z(config)
         self.results = []
-        LookupZSteppers(config, self.mcu_probe.add_stepper)
+        def add_z_stepper(stepper):
+            self.mcu_probe.add_stepper(stepper)
+            if (self.safety_endstop is None
+                and self.safety_endstop_pin is not None):
+                kin = self.printer.lookup_object('toolhead').get_kinematics()
+                for rail in getattr(kin, 'rails', []):
+                    if stepper not in rail.get_steppers():
+                        continue
+                    self.safety_endstop = rail.lookup_endstop(
+                        self.safety_endstop_pin, 'safety_endstop',
+                        add_to_rail=False)
+                    self.safety_endstop.share_dispatch(self.mcu_probe)
+                    break
+        LookupZSteppers(config, add_z_stepper)
     def descend_until_trigger(self, gcmd):
         toolhead = self.printer.lookup_object('toolhead')
         pos = toolhead.get_position()
@@ -262,8 +278,9 @@ class DescendToEndstopHelper:
         phoming = self.printer.lookup_object('homing')
         check_movement = (self.always_check_movement
                           or not phoming.check_probe_first_home(gcmd))
-        ppos = phoming.probing_move(self.mcu_probe, pos, speed,
-                                    check_movement=check_movement)
+        ppos = phoming.probing_move(
+            self.mcu_probe, pos, speed, check_movement=check_movement,
+            safety_endstop=self.safety_endstop)
         offsets = self.probe_offsets.get_offsets()
         res = manual_probe.create_probe_result(ppos, offsets)
         self.results.append(res)
@@ -548,8 +565,16 @@ def run_single_probe(probe, gcmd):
 class ProbeEndstopWrapper:
     def __init__(self, config, probe_offsets, param_helper):
         self.printer = config.get_printer()
+        self.param_helper = param_helper
         self.stow_on_each_sample = config.getboolean(
             'deactivate_on_each_sample', True)
+        self.verify_deploy = config.getboolean('verify_deploy', True)
+        self.deploy_attempts = config.getint('deploy_attempts', 5,
+                                             minval=1, maxval=5)
+        self.safety_recovery_z = config.getfloat(
+            'safety_recovery_z', 0., minval=0.)
+        self.safety_recovery_retries = config.getint(
+            'safety_recovery_retries', 0, minval=0, maxval=5)
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.activate_gcode = gcode_macro.load_template(
             config, 'activate_gcode', '')
@@ -558,10 +583,12 @@ class ProbeEndstopWrapper:
         # Create an "endstop" object to handle the probe pin
         ppins = self.printer.lookup_object('pins')
         self.mcu_endstop = ppins.setup_pin('endstop', config.get('pin'))
+        safety_pin = config.get('safety_endstop_pin', None)
         self.query_endstop = self.mcu_endstop.query_endstop
         # Probing via homing to endstop
         self.homing_helper = DescendToEndstopHelper(
-            config, self.mcu_endstop, probe_offsets, param_helper)
+            config, self.mcu_endstop, probe_offsets, param_helper,
+            safety_endstop_pin=safety_pin)
         # multi probes state
         self.multi = 'OFF'
     def _raise_probe(self):
@@ -574,10 +601,20 @@ class ProbeEndstopWrapper:
     def _lower_probe(self):
         toolhead = self.printer.lookup_object('toolhead')
         start_pos = toolhead.get_position()
-        self.activate_gcode.run_gcode_from_command()
-        if toolhead.get_position()[:3] != start_pos[:3]:
-            raise self.printer.command_error(
-                "Toolhead moved during probe activate_gcode script")
+        for attempt in range(self.deploy_attempts):
+            self.activate_gcode.run_gcode_from_command()
+            if toolhead.get_position()[:3] != start_pos[:3]:
+                raise self.printer.command_error(
+                    "Toolhead moved during probe activate_gcode script")
+            if not self.verify_deploy:
+                return
+            print_time = toolhead.get_last_move_time()
+            if not self.query_endstop(print_time):
+                return
+        self._raise_probe()
+        raise self.printer.command_error(
+            "Probe failed to deploy after %d attempts"
+            % (self.deploy_attempts,))
     def start_probe_session(self, gcmd):
         self.homing_helper.clear_trigger_positions()
         if not self.stow_on_each_sample:
@@ -591,11 +628,55 @@ class ProbeEndstopWrapper:
     def _probe_finish(self):
         if self.multi == 'OFF':
             self._raise_probe()
+    def _recover_safety_endstop(self, gcmd, attempt):
+        toolhead = self.printer.lookup_object('toolhead')
+        if self.safety_recovery_z <= 0.:
+            raise gcmd.error("Safety endstop triggered during probe")
+        curpos = toolhead.get_position()
+        curpos[2] += self.safety_recovery_z
+        params = self.param_helper.get_probe_params(gcmd)
+        gcmd.respond_info(
+            "Safety endstop triggered; raising Z %.3f mm and retrying "
+            "probe (%d/%d)" % (self.safety_recovery_z, attempt,
+                                self.safety_recovery_retries))
+        toolhead.manual_move(curpos, params['lift_speed'])
+        self._raise_probe()
+        print_time = toolhead.get_last_move_time()
+        if self.homing_helper.safety_endstop is not None:
+            if self.homing_helper.safety_endstop.query_endstop(print_time):
+                raise gcmd.error(
+                    "Safety endstop remained triggered after recovery")
+        self._lower_probe()
+    def _clear_safety_endstop(self, gcmd):
+        toolhead = self.printer.lookup_object('toolhead')
+        if self.safety_recovery_z <= 0.:
+            return
+        curpos = toolhead.get_position()
+        curpos[2] += self.safety_recovery_z
+        params = self.param_helper.get_probe_params(gcmd)
+        toolhead.manual_move(curpos, params['lift_speed'])
+        self._raise_probe()
+        print_time = toolhead.get_last_move_time()
+        if (self.homing_helper.safety_endstop is not None
+                and self.homing_helper.safety_endstop.query_endstop(print_time)):
+            raise gcmd.error(
+                "Safety endstop remained triggered after final recovery")
     def run_probe(self, gcmd):
         self._probe_prepare()
         try:
-            self.homing_helper.descend_until_trigger(gcmd)
-        except self.printer.command_error as e:
+            attempt = 0
+            while True:
+                try:
+                    self.homing_helper.descend_until_trigger(gcmd)
+                    break
+                except homing.ProbeSafetyError:
+                    if attempt >= self.safety_recovery_retries:
+                        self._clear_safety_endstop(gcmd)
+                        raise gcmd.error(
+                            "Safety endstop triggered during probe")
+                    attempt += 1
+                    self._recover_safety_endstop(gcmd, attempt)
+        except self.printer.command_error:
             self._probe_finish()
             raise
         self._probe_finish()

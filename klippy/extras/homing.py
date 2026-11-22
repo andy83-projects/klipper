@@ -9,6 +9,9 @@ HOMING_START_DELAY = 0.001
 ENDSTOP_SAMPLE_TIME = .000015
 ENDSTOP_SAMPLE_COUNT = 4
 
+class ProbeSafetyError(Exception):
+    """A probe move stopped on its auxiliary safety endstop."""
+
 # Return a completion that completes when all completions in a list complete
 def multi_complete(printer, completions):
     if len(completions) == 1:
@@ -17,6 +20,17 @@ def multi_complete(printer, completions):
     reactor = printer.get_reactor()
     cp = reactor.register_callback(lambda e: [c.wait() for c in completions])
     # If any completion indicates an error, then exit main completion early
+    for c in completions:
+        reactor.register_callback(
+            lambda e, c=c: cp.complete(1) if c.wait() else 0)
+    return cp
+
+# Return a completion that completes when any completion in a list completes
+def multi_complete_any(printer, completions):
+    if len(completions) == 1:
+        return completions[0]
+    reactor = printer.get_reactor()
+    cp = reactor.register_callback(lambda e: 0)
     for c in completions:
         reactor.register_callback(
             lambda e, c=c: cp.complete(1) if c.wait() else 0)
@@ -43,13 +57,17 @@ class StepperPosition:
 
 # Implementation of homing/probing moves
 class HomingMove:
-    def __init__(self, printer, endstops, toolhead=None):
+    def __init__(self, printer, endstops, toolhead=None,
+                 stepper_endstop=None, shared_endstop_dispatch=False):
         self.printer = printer
         self.endstops = [es for es in endstops if es[0].get_steppers()]
         if toolhead is None:
             toolhead = printer.lookup_object('toolhead')
         self.toolhead = toolhead
+        self.stepper_endstop = stepper_endstop
+        self.shared_endstop_dispatch = shared_endstop_dispatch
         self.stepper_positions = []
+        self.trigger_times = {}
     def get_mcu_endstops(self):
         return [es for es, name in self.endstops]
     def _calc_endstop_rate(self, mcu_endstop, movepos, speed):
@@ -83,19 +101,34 @@ class HomingMove:
         kin = self.toolhead.get_kinematics()
         kin_spos = {s.get_name(): s.get_commanded_position()
                     for s in kin.get_steppers()}
+        stepper_endstops = self.endstops
+        if self.stepper_endstop is not None:
+            stepper_endstops = [es for es in self.endstops
+                                if es[1] == self.stepper_endstop]
         self.stepper_positions = [ StepperPosition(s, name)
-                                   for es, name in self.endstops
+                                   for es, name in stepper_endstops
                                    for s in es.get_steppers() ]
         # Start endstop checking
         print_time = self.toolhead.get_last_move_time()
         endstop_triggers = []
+        shared_completion = None
         for mcu_endstop, name in self.endstops:
             rest_time = self._calc_endstop_rate(mcu_endstop, movepos, speed)
             wait = mcu_endstop.home_start(print_time, ENDSTOP_SAMPLE_TIME,
                                           ENDSTOP_SAMPLE_COUNT, rest_time,
-                                          triggered=triggered)
+                                          triggered=triggered,
+                                          trigger_completion=shared_completion)
+            if self.shared_endstop_dispatch:
+                shared_completion = wait
             endstop_triggers.append(wait)
-        all_endstop_trigger = multi_complete(self.printer, endstop_triggers)
+        if self.shared_endstop_dispatch:
+            all_endstop_trigger = shared_completion
+        elif self.stepper_endstop is None:
+            all_endstop_trigger = multi_complete(
+                self.printer, endstop_triggers)
+        else:
+            all_endstop_trigger = multi_complete_any(
+                self.printer, endstop_triggers)
         self.toolhead.dwell(HOMING_START_DELAY)
         # Issue move
         error = None
@@ -106,17 +139,61 @@ class HomingMove:
         # Wait for endstops to trigger
         trigger_times = {}
         move_end_print_time = self.toolhead.get_last_move_time()
+        shared_dispatch_result = None
+        shared_trigger_times = {}
         for mcu_endstop, name in self.endstops:
             try:
-                trigger_time = mcu_endstop.home_wait(move_end_print_time)
+                if self.shared_endstop_dispatch:
+                    if shared_dispatch_result is None:
+                        trigger_time, shared_dispatch_result = \
+                            mcu_endstop.home_wait(
+                                move_end_print_time,
+                                return_dispatch_result=True)
+                    else:
+                        trigger_time = mcu_endstop.home_wait(
+                            move_end_print_time,
+                            dispatch_result=shared_dispatch_result)
+                    shared_trigger_times[name] = trigger_time
+                else:
+                    trigger_time = mcu_endstop.home_wait(move_end_print_time)
             except self.printer.command_error as e:
                 if error is None:
                     error = "Error during homing %s: %s" % (name, str(e))
                 continue
-            if trigger_time > 0.:
-                trigger_times[name] = trigger_time
+            if not self.shared_endstop_dispatch:
+                if trigger_time > 0.:
+                    trigger_times[name] = trigger_time
+                elif (check_triggered and error is None
+                      and name == self.stepper_endstop):
+                    error = "No trigger on %s after full movement" % (name,)
+        if self.shared_endstop_dispatch:
+            # Query all inputs after both endstop channels have been
+            # disarmed.  A shared trsync stop can leave the non-triggering
+            # channel's cached state asserted, so prefer a live probe trigger
+            # when both inputs appear active.
+            shared_states = {
+                name: mcu_endstop.query_endstop(move_end_print_time)
+                for mcu_endstop, name in self.endstops}
+            if shared_states.get(self.stepper_endstop, False):
+                trigger_times[self.stepper_endstop] = (
+                    shared_trigger_times.get(self.stepper_endstop)
+                    or move_end_print_time)
+            elif shared_states.get("safety_endstop", False):
+                # The safety input may be the channel that stopped the
+                # shared trsync move.  Use its actual trigger timestamp for
+                # the primary probe as well, otherwise probe_pos handling
+                # falls back to move_end_print_time (the planned end of the
+                # descent, often position_min) and corrupts toolhead Z.
+                safety_trigger_time = (
+                    shared_trigger_times.get("safety_endstop")
+                    or move_end_print_time)
+                trigger_times["safety_endstop"] = safety_trigger_time
+                if self.stepper_endstop is not None:
+                    trigger_times[self.stepper_endstop] = safety_trigger_time
             elif check_triggered and error is None:
-                error = "No trigger on %s after full movement" % (name,)
+                error = "No trigger on %s after full movement" % (
+                    self.stepper_endstop,)
+        self.trigger_times = trigger_times
         # Determine stepper halt positions
         self.toolhead.flush_step_generation()
         for sp in self.stepper_positions:
@@ -127,6 +204,15 @@ class HomingMove:
                           for sp in self.stepper_positions}
             trig_steps = {sp.stepper_name: sp.trig_pos - sp.start_pos
                           for sp in self.stepper_positions}
+            if "safety_endstop" in trigger_times:
+                # A shared endstop dispatch stops the move at whichever
+                # input triggers first.  If that input is the safety
+                # endstop, the probe trigger position is not valid.  Use the
+                # actual halted stepper positions so the toolhead position is
+                # synchronized before probe recovery moves it again.
+                # Otherwise the planned probe endpoint (often position_min)
+                # can survive the safety recovery as a false Z coordinate.
+                trig_steps = halt_steps
             haltpos = trigpos = self.calc_toolhead_pos(kin_spos, trig_steps)
             if trig_steps != halt_steps:
                 haltpos = self.calc_toolhead_pos(kin_spos, halt_steps)
@@ -321,9 +407,14 @@ class PrinterHoming:
     def check_probe_first_home(self, gcmd):
         return (gcmd.get_command() == 'G28'
                 and gcmd.get("HOME_ATTEMPT_NUM", None) == '1')
-    def probing_move(self, mcu_probe, pos, speed, check_movement=True):
+    def probing_move(self, mcu_probe, pos, speed, check_movement=True,
+                     safety_endstop=None):
         endstops = [(mcu_probe, "probe")]
-        hmove = HomingMove(self.printer, endstops)
+        if safety_endstop is not None:
+            endstops.append((safety_endstop, "safety_endstop"))
+        hmove = HomingMove(
+            self.printer, endstops, stepper_endstop="probe",
+            shared_endstop_dispatch=safety_endstop is not None)
         try:
             epos = hmove.homing_move(pos, speed, probe_pos=True)
         except self.printer.command_error:
@@ -331,6 +422,8 @@ class PrinterHoming:
                 raise self.printer.command_error(
                     "Probing failed due to printer shutdown")
             raise
+        if "safety_endstop" in hmove.trigger_times:
+            raise ProbeSafetyError("Safety endstop triggered during probe")
         if check_movement and hmove.check_no_movement() is not None:
             raise self.printer.command_error(
                 "Probe triggered prior to movement")

@@ -2129,10 +2129,28 @@ pin:
 #   Probe detection pin. If the pin is on a different microcontroller
 #   than the Z steppers then it enables "multi-mcu homing". This
 #   parameter must be provided.
+#safety_endstop_pin:
+#   Optional endstop pin to monitor during probe moves. If this endstop
+#   triggers before the probe, the probe move is stopped and reported as
+#   a failure. The normal probe remains the only source of probe results.
+#   This option is disabled by default.
 #deactivate_on_each_sample: True
 #   This determines if Klipper should execute deactivation gcode
 #   between each probe attempt when performing a multiple probe
 #   sequence. The default is True.
+#verify_deploy: True
+#   Verify that the probe reports open after activate_gcode before beginning
+#   a probe move. If it remains triggered, the probe move is aborted.
+#deploy_attempts: 5
+#   Number of times to run activate_gcode while verifying probe deployment.
+#   The range is 1 to 5 and the default is 5.
+#safety_recovery_z: 0.0
+#   If safety_endstop_pin triggers during a probe move, raise the toolhead by
+#   this distance before retrying. A value of 0 disables recovery. The default
+#   is 0.0.
+#safety_recovery_retries: 0
+#   Number of times to recover from a safety endstop trigger and retry the
+#   probe. The range is 0 to 5 and the default is 0.
 #x_offset: 0.0
 #   The distance (in mm) between the probe and the nozzle along the
 #   x-axis. The default is 0.

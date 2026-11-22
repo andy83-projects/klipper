@@ -406,7 +406,7 @@ class GenericPrinterRail:
         return list(self.steppers)
     def get_endstops(self):
         return list(self.endstops)
-    def lookup_endstop(self, endstop_pin, name):
+    def lookup_endstop(self, endstop_pin, name, add_to_rail=True):
         ppins = self.printer.lookup_object('pins')
         pin_params = ppins.parse_pin(endstop_pin, True, True)
         # Normalize pin name
@@ -419,7 +419,8 @@ class GenericPrinterRail:
             self.endstop_map[pin_name] = {'endstop': mcu_endstop,
                                           'invert': pin_params['invert'],
                                           'pullup': pin_params['pullup']}
-            self.endstops.append((mcu_endstop, name))
+            if add_to_rail:
+                self.endstops.append((mcu_endstop, name))
             self.query_endstops.register_endstop(mcu_endstop, name)
         else:
             mcu_endstop = endstop['endstop']
